@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: amao-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Amao2026!}
+      MYSQL_DATABASE: amao
+      MYSQL_USER: amao
+      MYSQL_PASSWORD: ${DB_PASSWORD:-Amao2026!}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: amao-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 后端应用
+  backend:
+    build: .
+    container_name: amao-backend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+      - DB_HOST=mysql
+      - DB_USER=amao
+      - DB_PASSWORD=${DB_PASSWORD:-Amao2026!}
+      - DB_NAME=amao
+      - SMS_ENDPOINT=${SMS_ENDPOINT}
+      - SMS_ACCOUNT_SID=${SMS_ACCOUNT_SID}
+      - SMS_ACCOUNT_TOKEN=${SMS_ACCOUNT_TOKEN}
+      - SMS_APP_ID=${SMS_APP_ID}
+      - RONGCLOUD_APP_KEY=${RONGCLOUD_APP_KEY}
+      - RONGCLOUD_APP_SECRET=${RONGCLOUD_APP_SECRET}
+      - AMAP_KEY=${AMAP_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  redis_data:
