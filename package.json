@@ -1,0 +1,22 @@
+{
+  "name": "amao-backend",
+  "version": "1.0.0",
+  "description": "宠物相亲平台后端API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mysql2": "^3.6.0",
+    "sequelize": "^6.33.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.0",
+    "axios": "^1.5.0",
+    "qs": "^6.11.2"
+  }
+}
