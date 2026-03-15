@@ -80,6 +80,54 @@ async function getPool() {
   return pool;
 }
 
+// 加载补充API模块
+const supplementAPI = require('./supplement');
+console.log('Loading supplement API...');
+supplementAPI(app, { getPool, jwt, bcrypt, JWT_SECRET });
+console.log('Supplement API loaded');
+
+// ========================================
+// 数据库自动迁移
+// ========================================
+async function runMigrations() {
+  console.log('[Migration] Checking database schema...');
+  const pool = await getPool();
+  
+  const migrations = [
+    { name: 'posts.video', sql: 'ALTER TABLE posts ADD COLUMN video VARCHAR(500) DEFAULT NULL' },
+    { name: 'users.is_admin', sql: 'ALTER TABLE users ADD COLUMN is_admin TINYINT(1) DEFAULT 0' },
+    { name: 'activity_registrations.checked_in', sql: 'ALTER TABLE activity_registrations ADD COLUMN checked_in TINYINT(1) DEFAULT 0' },
+    { name: 'posts.is_pinned', sql: 'ALTER TABLE posts ADD COLUMN is_pinned TINYINT(1) DEFAULT 0' },
+    { name: 'activities.status', sql: "ALTER TABLE activities ADD COLUMN status VARCHAR(20) DEFAULT 'pending'" }
+  ];
+  
+  for (const m of migrations) {
+    try {
+      await pool.execute(m.sql);
+      console.log(`[Migration] Added: ${m.name}`);
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log(`[Migration] Already exists: ${m.name}`);
+      } else {
+        console.log(`[Migration] Error for ${m.name}: ${e.message}`);
+      }
+    }
+  }
+  
+  // 设置测试账号为管理员
+  try {
+    await pool.execute('UPDATE users SET is_admin = 1 WHERE phone = "13800000001"');
+    console.log('[Migration] Set test user as admin');
+  } catch (e) {
+    console.log('[Migration] Admin setup error:', e.message);
+  }
+  
+  console.log('[Migration] Done');
+}
+
+// 运行迁移
+runMigrations().catch(console.error);
+
 // ========================================
 // 1. 短信验证码系统
 // ========================================
@@ -407,9 +455,11 @@ app.get('/api/posts/:postId/comments', async (req, res) => {
     const { limit = 20, offset = 0 } = req.query;
     const pool = await getPool();
     await initCommentDB();
-    const [comments] = await pool.execute(
-      `SELECT c.*, u.nickname, u.avatar as user_avatar, (SELECT COUNT(*) FROM comment_likes WHERE comment_id = c.id) as likes_count FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? AND c.parent_id IS NULL ORDER BY c.created_at DESC LIMIT ? OFFSET ?`,
-      [postId, parseInt(limit), parseInt(offset)]
+    const limitVal = parseInt(limit) || 20;
+    const offsetVal = parseInt(offset) || 0;
+    const [comments] = await pool.query(
+      `SELECT c.*, u.nickname, u.avatar as user_avatar, (SELECT COUNT(*) FROM comment_likes WHERE comment_id = c.id) as likes_count FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? AND c.parent_id IS NULL ORDER BY c.created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`,
+      [postId]
     );
     for (const comment of comments) {
       const [replies] = await pool.execute(`SELECT c.*, u.nickname, u.avatar as user_avatar, (SELECT COUNT(*) FROM comment_likes WHERE comment_id = c.id) as likes_count FROM comments c JOIN users u ON c.user_id = u.id WHERE c.parent_id = ? ORDER BY c.created_at ASC`, [comment.id]);
@@ -508,12 +558,13 @@ app.get('/api/points/history', async (req, res) => {
     const pool = await getPool();
     await initPointsDB();
     const { limit = 20, offset = 0, type } = req.query;
+    const limitVal = parseInt(limit) || 20;
+    const offsetVal = parseInt(offset) || 0;
     let query = 'SELECT * FROM points_records WHERE user_id = ?';
     const params = [decoded.userId];
     if (type) { query += ' AND type = ?'; params.push(type); }
-    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
-    const [records] = await pool.execute(query, params);
+    query += ` ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`;
+    const [records] = await pool.query(query, params);
     const [users] = await pool.execute('SELECT points, exp FROM users WHERE id = ?', [decoded.userId]);
     const [levels] = await pool.execute('SELECT * FROM levels ORDER BY level ASC');
     let currentLevel = levels[0];
@@ -709,9 +760,11 @@ app.get('/api/notifications', async (req, res) => {
     const pool = await getPool();
     await initNotificationDB();
     const { limit = 20, offset = 0 } = req.query;
-    const [notifications] = await pool.execute(
-      'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
-      [decoded.userId, parseInt(limit), parseInt(offset)]
+    const limitVal = parseInt(limit) || 20;
+    const offsetVal = parseInt(offset) || 0;
+    const [notifications] = await pool.query(
+      `SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`,
+      [decoded.userId]
     );
     const [unreadCount] = await pool.execute('SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = FALSE', [decoded.userId]);
     res.json({ notifications, unreadCount: unreadCount[0].count });
@@ -811,12 +864,12 @@ app.get('/api/analytics/events', async (req, res) => {
     const { eventType, limit = 100 } = req.query;
     const pool = await getPool();
     await initAnalyticsDB();
+    const limitVal = parseInt(limit) || 100;
     let query = 'SELECT * FROM analytics_events';
     const params = [];
     if (eventType) { query += ' WHERE event_type = ?'; params.push(eventType); }
-    query += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
-    const [events] = await pool.execute(query, params);
+    query += ` ORDER BY created_at DESC LIMIT ${limitVal}`;
+    const [events] = await pool.query(query, params);
     res.json(events);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -927,12 +980,13 @@ app.get('/api/posts', async (req, res) => {
   try {
     const pool = await getPool();
     const { category, limit = 20, offset = 0 } = req.query;
-    let query = 'SELECT * FROM posts';
+    const limitVal = parseInt(limit) || 20;
+    const offsetVal = parseInt(offset) || 0;
+    let query = 'SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar FROM posts p LEFT JOIN users u ON p.user_id = u.id';
     const params = [];
-    if (category) { query += ' WHERE category = ?'; params.push(category); }
-    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
-    const [posts] = await pool.execute(query, params);
+    if (category) { query += ' WHERE p.category = ?'; params.push(category); }
+    query += ` ORDER BY p.created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`;
+    const [posts] = await pool.query(query, params);
     res.json(posts);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -3012,8 +3066,32 @@ async function initPostExtensionDB() {
   )`);
 }
 
-// 获取帖子详情
+// 获取帖子详情 (兼容旧版API)
 app.get('/api/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = await getPool();
+    
+    const [posts] = await pool.execute(
+      `SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar 
+       FROM posts p 
+       JOIN users u ON p.user_id = u.id 
+       WHERE p.id = ?`,
+      [id]
+    );
+    
+    if (posts.length === 0) return res.status(404).json({ error: '帖子不存在' });
+    
+    // 检查是否置顶
+    const [pins] = await pool.execute('SELECT * FROM post_pins WHERE post_id = ? AND (expire_at IS NULL OR expire_at > NOW())', [id]);
+    posts[0].is_pinned = pins.length > 0;
+    
+    res.json(posts[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 获取帖子详情
+app.get('/api/posts/detail/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const pool = await getPool();
@@ -3107,17 +3185,17 @@ app.get('/api/posts/hot', async (req, res) => {
   try {
     const { limit = 20 } = req.query;
     const pool = await getPool();
+    const limitVal = parseInt(limit) || 20;
     
     // 热门算法：点赞*2 + 评论*3 + 发布时间衰减
-    const [posts] = await pool.execute(
+    const [posts] = await pool.query(
       `SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar,
        (p.likes * 2 + p.comments_count * 3) as hot_score
        FROM posts p 
        JOIN users u ON p.user_id = u.id
        LEFT JOIN post_pins pp ON p.id = pp.post_id AND (pp.expire_at IS NULL OR pp.expire_at > NOW())
        WHERE pp.id IS NULL
-       ORDER BY hot_score DESC, p.created_at DESC LIMIT ?`,
-      [parseInt(limit)]
+       ORDER BY hot_score DESC, p.created_at DESC LIMIT ${limitVal}`
     );
     
     res.json(posts);
@@ -3130,6 +3208,7 @@ app.get('/api/posts/recommended', async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     const { limit = 20 } = req.query;
     const pool = await getPool();
+    const limitVal = parseInt(limit) || 20;
     
     let recommendedPosts;
     
@@ -3138,7 +3217,7 @@ app.get('/api/posts/recommended', async (req, res) => {
         const decoded = jwt.verify(token, JWT_SECRET);
         
         // 基于用户兴趣推荐
-        const [preferences] = await pool.execute(
+        const [preferences] = await pool.query(
           'SELECT interest_tags FROM user_profiles WHERE user_id = ?',
           [decoded.userId]
         );
@@ -3148,13 +3227,13 @@ app.get('/api/posts/recommended', async (req, res) => {
           if (tags.length > 0) {
             // 随机选择标签进行推荐
             const randomTag = tags[Math.floor(Math.random() * tags.length)];
-            const [posts] = await pool.execute(
+            const [posts] = await pool.query(
               `SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar
                FROM posts p 
                JOIN users u ON p.user_id = u.id
                WHERE p.category LIKE ?
-               ORDER BY p.likes DESC, p.created_at DESC LIMIT ?`,
-              [`%${randomTag}%`, parseInt(limit)]
+               ORDER BY p.likes DESC, p.created_at DESC LIMIT ${limitVal}`,
+              [`%${randomTag}%`]
             );
             if (posts.length > 0) return res.json(posts);
           }
@@ -3163,12 +3242,11 @@ app.get('/api/posts/recommended', async (req, res) => {
     }
     
     // 默认推荐：综合热门
-    const [defaultPosts] = await pool.execute(
+    const [defaultPosts] = await pool.query(
       `SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar
        FROM posts p 
        JOIN users u ON p.user_id = u.id
-       ORDER BY p.created_at DESC LIMIT ?`,
-      [parseInt(limit)]
+       ORDER BY p.created_at DESC LIMIT ${limitVal}`
     );
     
     res.json(defaultPosts);
@@ -3831,6 +3909,47 @@ async function checkAdmin(req, res, next) {
   }
 }
 
+// 数据库迁移接口
+app.post('/api/admin/migrate', async (req, res) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: '未登录' });
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [users] = await pool.execute('SELECT is_admin FROM users WHERE id = ?', [decoded.userId]);
+    
+    if (users.length === 0 || !users[0].is_admin) {
+      return res.status(403).json({ error: '无管理员权限' });
+    }
+    
+    // 执行数据库迁移
+    const migrations = [
+      'ALTER TABLE posts ADD COLUMN video VARCHAR(500) DEFAULT NULL',
+      'ALTER TABLE users ADD COLUMN is_admin TINYINT(1) DEFAULT 0',
+      'ALTER TABLE activity_registrations ADD COLUMN checked_in TINYINT(1) DEFAULT 0',
+      'ALTER TABLE posts ADD COLUMN is_pinned TINYINT(1) DEFAULT 0',
+      'ALTER TABLE activities ADD COLUMN status VARCHAR(20) DEFAULT "pending"',
+      'UPDATE users SET is_admin = 1 WHERE phone = "13800000001"'
+    ];
+    
+    for (const sql of migrations) {
+      try {
+        await pool.execute(sql);
+      } catch (e) {
+        // 忽略已存在的字段错误
+        if (!e.message.includes('Duplicate column')) {
+          console.log('Migration warning:', e.message);
+        }
+      }
+    }
+    
+    res.json({ success: true, message: '数据库迁移完成' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/admin/users', checkAdmin, async (req, res) => {
   try {
     const { page = 1, limit = 20, keyword } = req.query;
@@ -4423,6 +4542,150 @@ app.get('/api/checkin/status', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+
+// 修复后的帖子列表 - 使用字符串拼接
+app.get('/api/posts_list', async (req, res) => {
+  try {
+    const { limit = 20, offset = 0 } = req.query;
+    const pool = await getPool();
+    const [posts] = await pool.query('SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar FROM posts p LEFT JOIN users u ON p.user_id = u.id ORDER BY p.created_at DESC LIMIT ' + parseInt(limit) + ' OFFSET ' + parseInt(offset));
+    res.json(posts);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 修复后的热门帖子
+app.get('/api/posts_hot', async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+    const pool = await getPool();
+    const [posts] = await pool.query('SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar FROM posts p LEFT JOIN users u ON p.user_id = u.id ORDER BY p.likes DESC LIMIT ' + parseInt(limit||20));
+    res.json(posts);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 修复后的热门活动
+app.get('/api/activities_hot', async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+    const pool = await getPool();
+    const [activities] = await pool.query('SELECT a.*, u.nickname as organizer_name FROM activities a LEFT JOIN users u ON a.user_id = u.id ORDER BY a.created_at DESC LIMIT ' + parseInt(limit||20));
+    res.json(activities);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 修复后的积分
+app.get('/api/points_balance', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: '请先登录' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [users] = await pool.execute('SELECT points FROM users WHERE id = ?', [decoded.userId]);
+    res.json({ points: users[0]?.points || 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 修复后的附近宠物
+app.get('/api/nearby_pets', async (req, res) => {
+  try {
+    const pool = await getPool();
+    const [pets] = await pool.query('SELECT * FROM pets LIMIT 20');
+    res.json(pets);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 修复后的Feed
+app.get('/api/feed_new', async (req, res) => {
+  try {
+    const pool = await getPool();
+    const [posts] = await pool.query('SELECT p.*, u.nickname as user_nickname, u.avatar as user_avatar FROM posts p LEFT JOIN users u ON p.user_id = u.id ORDER BY p.created_at DESC LIMIT 20');
+    res.json(posts);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+
+// 积分历史（修复版）
+app.get('/api/points_history', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: '请先登录' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [records] = await pool.query('SELECT * FROM points_records WHERE user_id = ' + decoded.userId + ' ORDER BY created_at DESC LIMIT 20');
+    res.json(records);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 搜索宠物（修复版）
+app.get('/api/search_pets', async (req, res) => {
+  try {
+    const { q = '' } = req.query;
+    const pool = await getPool();
+    const [pets] = await pool.query('SELECT * FROM pets WHERE name LIKE "%' + q + '%" OR breed LIKE "%' + q + '%" LIMIT 20');
+    res.json(pets);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+
+// 关注列表（修复版）
+app.get('/api/follows_new', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const pool = await getPool();
+    const [follows] = await pool.query('SELECT u.* FROM users u JOIN follows f ON u.id = f.following_id WHERE f.user_id = ' + userId + ' LIMIT 20');
+    res.json(follows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 粉丝列表（修复版）
+app.get('/api/followers_new', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const pool = await getPool();
+    const [followers] = await pool.query('SELECT u.* FROM users u JOIN follows f ON u.id = f.user_id WHERE f.following_id = ' + userId + ' LIMIT 20');
+    res.json(followers);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 通知列表（修复版）
+app.get('/api/notifications_new', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: '请先登录' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [notis] = await pool.query('SELECT * FROM notifications WHERE user_id = ' + decoded.userId + ' ORDER BY created_at DESC LIMIT 20');
+    res.json(notis);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 收藏列表（修复版）
+app.get('/api/favorites_new', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: '请先登录' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [favs] = await pool.query('SELECT pf.*, p.content FROM post_favorites pf LEFT JOIN posts p ON pf.post_id = p.id WHERE pf.user_id = ' + decoded.userId + ' ORDER BY pf.created_at DESC LIMIT 20');
+    res.json(favs);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 消息会话（修复版）
+app.get('/api/messages_conversations', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: '请先登录' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const pool = await getPool();
+    const [msgs] = await pool.query('SELECT * FROM private_messages WHERE sender_id = ' + decoded.userId + ' OR receiver_id = ' + decoded.userId + ' ORDER BY created_at DESC LIMIT 20');
+    res.json(msgs);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 // 启动服务器
 app.listen(PORT, '0.0.0.0', () => {
